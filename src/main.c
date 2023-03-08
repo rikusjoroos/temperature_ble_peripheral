@@ -1,35 +1,35 @@
+/*
+ * Copyright (c) 2012-2014 Wind River Systems, Inc.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-#include <zephyr/sys/printk.h>
-#include <math.h>
-#include <stdio.h>
-
-// devicetree + gpio includes
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
 
-// bluetooth include files
+//For rounding
+#include <math.h>
+
+//bluetooth include files
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/services/bas.h>
 #include <zephyr/bluetooth/uuid.h>
 
 // Max6675 sensor include files
-#include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/device.h>
+
+
 
 // Device name and device name length used in advertising data
 #define DEVICE_NAME "Temperature Monitoring Device"
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
+//GPIO
+#include <zephyr/drivers/gpio.h>
+
 #define LED1_NODE DT_ALIAS(ledext)
-
-// Variable for indicating if subscribed
-int subsc = 0;
-double tempd = 0;
-
-
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
 
 // Bluetooth advertising data
@@ -38,9 +38,7 @@ static const struct bt_data ad[] = {
     BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
 };
 
-// Simple service for temperature value sending:
-
-// Service: simple service UUID B9A4A778-4BD5-4FC9-9885-FEC0C5531307
+// Service: temperature service UUID B9A4A778-4BD5-4FC9-9885-FEC0C5531307
 static struct bt_uuid_128 temperature_service_uuid =
     BT_UUID_INIT_128(0x07, 0x13, 0x53, 0xC5, 0xC0, 0xFE, 0x85, 0x98, 0xC9, 0x4F, 0xD5, 0x4B, 0x78, 0xA7, 0xA4, 0xB9);
 
@@ -49,6 +47,7 @@ static struct bt_uuid_128 temp_value_uuid =
     BT_UUID_INIT_128(0x07, 0x13, 0x53, 0xC5, 0xC0, 0xFE, 0x85, 0x98, 0xC9, 0x4F, 0xD5, 0x4B, 0x79, 0xA7, 0xA4, 0xB9);
 
 // When notification status is changed this function is called
+int subsc = 0;
 void on_cccd_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
     ARG_UNUSED(attr);
@@ -57,12 +56,12 @@ void on_cccd_changed(const struct bt_gatt_attr *attr, uint16_t value)
     case BT_GATT_CCC_NOTIFY:
 
         subsc = 1;
-        printf("bt_gatt sub %d", subsc);
+        printk("bt_gatt sub %d", subsc);
         break;
 
     case 0:
         subsc = 0;
-        printf("bt_gatt unsub %d", subsc);
+        printk("bt_gatt unsub %d", subsc);
         // Stop sending stuff
         break;
 
@@ -86,6 +85,8 @@ BT_GATT_SERVICE_DEFINE(
                            NULL),
     BT_GATT_CCC(on_cccd_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE), );
+
+
 
 struct bt_conn *my_connection;
 
@@ -116,22 +117,19 @@ static struct bt_conn_cb conn_callbacks = {
     .disconnected = disconnected_cb,
 };
 
-
 // Measure ten values and return average of values
-double movingAverage(const struct device *const dev){
+double averageMeasurement(const struct device *const dev){
         double avg = 0;
         double sum = 0;
-        double temp = 0;
         double values[] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        int i = 0;
-
+        double tempd;
         int ret;
 
 
         //Struct for sensor value
         struct sensor_value val;
 
-        for(i = 0; i < 10; i++){
+        for(int i = 0; i < 10; i++){
             // Fetching sample
             ret = sensor_sample_fetch_chan(dev, SENSOR_CHAN_AMBIENT_TEMP);
             if (ret < 0)
@@ -153,7 +151,7 @@ double movingAverage(const struct device *const dev){
             k_sleep(K_SECONDS(1));
         }
 
-        for (i = 0; i < 10; i++){
+        for (int i = 0; i < 10; i++){
             sum = sum + values[i];
 
         }
@@ -161,13 +159,10 @@ double movingAverage(const struct device *const dev){
         return avg;
 }
 
-int j = 0;
 void main(void)
 {
     // Temperature sensor (amplifier)
     const struct device *const dev = DEVICE_DT_GET_ONE(maxim_max6675);
-
-
 
     //For checking that temperature sensor is ready
     if (!device_is_ready(dev))
@@ -176,20 +171,8 @@ void main(void)
 
     }
 
-
-    int err;
-
-    //Configure led
-    err = gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
-    if (err<0)
-    {
-        return;
-    }
-
-    //Set led to 0
-    gpio_pin_set_dt(&led, 0);
-
-    // Initialize the bluetooth stack
+	int err;
+	// Initialize the bluetooth stack
     err = bt_enable(NULL);
     if (err)
     {
@@ -216,6 +199,13 @@ void main(void)
 
     printk("Bluetooth advertising started \n");
 
+    //Configure led
+    err = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+    if (err<0)
+    {
+        return;
+    }
+
 
 
     while (1)
@@ -224,17 +214,21 @@ void main(void)
         //If notifications are subsribed then send data
         if (subsc)
         {
-            double movingAvgTempDouble = 0;
-            int movingAvgInt = 0;
+            double AvgTempDouble = 0;
+            int AvgInt = 0;
 
             //turn led on when measuring is started
             gpio_pin_set_dt(&led, 1);
-            movingAvgTempDouble = movingAverage(dev);
-            movingAvgInt = round(movingAvgTempDouble);
-            printk("Rounded temperature: %d, Average temperature: %f \n\r",movingAvgInt, movingAvgTempDouble);
+
+            //Temperature average as double
+            AvgTempDouble = averageMeasurement(dev);
+
+            //Rounded temperature
+            AvgInt = round(AvgTempDouble);
+            printk("Rounded temperature: %d, Average temperature: %f \n\r",AvgInt, AvgTempDouble);
             
             //Send notification
-            bt_gatt_notify(NULL, &temperature_service.attrs[2], &movingAvgInt, sizeof(movingAvgInt));
+            bt_gatt_notify(NULL, &temperature_service.attrs[2], &AvgInt, sizeof(AvgInt));
 
             //Turn led off when data is sent
             gpio_pin_set_dt(&led, 0);
@@ -243,4 +237,5 @@ void main(void)
         //Sleep 50 seconds, measuring takes 10 seconds so total 60 second interval
         k_sleep(K_SECONDS(50));
     }
+    
 }
